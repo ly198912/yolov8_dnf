@@ -1,0 +1,214 @@
+import ctypes
+import time
+import traceback
+import cv2
+
+from bind_window import GameWindowBinder
+from minimap_nav import MinimapNavigator
+from game_nav import SimpleGameAgent
+from detector import Detector
+
+WINDOW_TITLE = '地下城与勇士：创新世纪'
+DIRECTION_LABELS = [
+    'left', 'right', 'up', 'down',
+    'left_up', 'left_down', 'right_up', 'right_down'
+]
+
+VK_F8 = 0x77
+VK_F9 = 0x78
+VK_F10 = 0x79
+
+
+class HotkeyManager:
+    def __init__(self):
+        self._last_state = {VK_F8: False, VK_F9: False, VK_F10: False}
+        self._support = hasattr(ctypes, 'windll') and hasattr(ctypes.windll, 'user32')
+
+    def pressed_once(self, vk_code):
+        if not self._support:
+            return False
+        state = bool(ctypes.windll.user32.GetAsyncKeyState(vk_code) & 0x8000)
+        old = self._last_state.get(vk_code, False)
+        self._last_state[vk_code] = state
+        return state and not old
+
+
+class RunnerState:
+    def __init__(self):
+        self.running = False
+        self.exit_flag = False
+        self.last_action = '未启动'
+        self.last_error = ''
+        self.last_log_time = 0
+
+
+def pick_yolo_direction(obj_list):
+    if not obj_list:
+        return None
+
+    best_label = None
+    best_conf = -1.0
+
+    for item in obj_list:
+        for label, info in item.items():
+            name = str(label).lower()
+            if name in DIRECTION_LABELS:
+                conf = float(info.get('conf', 0.0))
+                if conf > best_conf:
+                    best_conf = conf
+                    best_label = name.upper()
+
+    return best_label
+
+
+def draw_status_panel(frame_bgr, state, yolo_direction, minimap_direction, final_direction):
+    if frame_bgr is None:
+        return None
+
+    img = frame_bgr.copy()
+    lines = [
+        f"F8 开始  F9 暂停  F10 退出",
+        f"状态: {'运行中' if state.running else '已暂停'}",
+        f"YOLO方向: {yolo_direction or '无'}",
+        f"小地图方向: {minimap_direction or '无'}",
+        f"最终方向: {final_direction or '无'}",
+        f"动作: {state.last_action}",
+    ]
+
+    if state.last_error:
+        lines.append(f"错误: {state.last_error[:40]}")
+
+    panel_h = 24 * len(lines) + 15
+    cv2.rectangle(img, (10, 10), (360, panel_h), (20, 20, 20), -1)
+
+    y = 32
+    for line in lines:
+        cv2.putText(img, line, (18, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 1)
+        y += 24
+    return img
+
+
+def print_once_per_sec(state, obj_count, yolo_direction, minimap_direction, final_direction, mini_result):
+    now = time.time()
+    if now - state.last_log_time < 1.0:
+        return
+
+    print(
+        f"[状态] {'运行中' if state.running else '已暂停'} | "
+        f"检测={obj_count} | "
+        f"YOLO方向={yolo_direction or '无'} | "
+        f"小地图方向={minimap_direction or '无'} | "
+        f"最终方向={final_direction or '无'} | "
+        f"蓝点={'有' if mini_result.get('blue_found') else '无'} | "
+        f"目标={'有' if mini_result.get('target_found') else '无'} | "
+        f"动作={state.last_action}"
+    )
+    state.last_log_time = now
+
+
+def main():
+    binder = GameWindowBinder(WINDOW_TITLE)
+    binder.bind()
+
+    detector = Detector("")
+    mini_nav = MinimapNavigator()
+    state = RunnerState()
+    hotkey = HotkeyManager()
+
+    print("=" * 60)
+    print("已绑定游戏窗口")
+    print("F8 开始自动运行")
+    print("F9 暂停自动运行")
+    print("F10 退出脚本")
+    print("也可以在图像窗口里按 q 退出")
+    print("=" * 60)
+
+    while not state.exit_flag:
+        yolo_direction = None
+        minimap_direction = None
+        final_direction = None
+        mini_result = {
+            'blue_found': False,
+            'target_found': False,
+            'debug_img': None,
+            'blue_mask': None,
+            'q_mask': None,
+        }
+
+        try:
+            if hotkey.pressed_once(VK_F8):
+                state.running = True
+                state.last_action = '已开始'
+                print('[热键] 已开始自动运行')
+
+            if hotkey.pressed_once(VK_F9):
+                state.running = False
+                state.last_action = '已暂停'
+                print('[热键] 已暂停自动运行')
+
+            if hotkey.pressed_once(VK_F10):
+                state.exit_flag = True
+                print('[热键] 退出脚本')
+                break
+
+            frame_rgb = binder.grab(rgb=True)
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            show_img, obj = detector.detect(frame_rgb)
+            yolo_direction = pick_yolo_direction(obj)
+
+            _, _, win_w, win_h = binder.get_rect()
+            crop_x, crop_y, crop_w, crop_h = mini_nav.get_crop_rect(win_w, win_h)
+            mini_bgr = binder.grab_crop(crop_x, crop_y, crop_w, crop_h, rgb=False)
+            mini_result = mini_nav.analyze(mini_bgr)
+            minimap_direction = mini_result.get('direction')
+            final_direction = yolo_direction or minimap_direction
+
+            h, w = frame_bgr.shape[:2]
+            agent = SimpleGameAgent(obj, w, h)
+
+            if state.running:
+                state.last_action = agent.run(
+                    yolo_direction=yolo_direction,
+                    minimap_direction=minimap_direction
+                )
+            else:
+                state.last_action = '等待开始(F8)'
+
+            print_once_per_sec(
+                state,
+                len(obj) if obj else 0,
+                yolo_direction,
+                minimap_direction,
+                final_direction,
+                mini_result,
+            )
+
+            main_view = show_img if show_img is not None else frame_bgr
+            main_view = draw_status_panel(main_view, state, yolo_direction, minimap_direction, final_direction)
+            cv2.imshow('YOLO', cv2.resize(main_view, (960, 540)))
+
+            if mini_result.get('debug_img') is not None:
+                cv2.imshow('Minimap_Debug', cv2.resize(mini_result['debug_img'], (340, 190)))
+            if mini_result.get('blue_mask') is not None:
+                cv2.imshow('BlueMask', cv2.resize(mini_result['blue_mask'], (340, 190)))
+            if mini_result.get('q_mask') is not None:
+                cv2.imshow('QMask', cv2.resize(mini_result['q_mask'], (340, 190)))
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+
+            time.sleep(0.03)
+
+        except Exception as e:
+            state.last_error = str(e)
+            state.last_action = '发生错误，已继续重试'
+            print('[错误]', e)
+            print(traceback.format_exc(limit=1))
+            time.sleep(0.5)
+
+    cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    main()
