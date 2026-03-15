@@ -1,0 +1,111 @@
+# bind_window.py
+# 绑定游戏窗口 + 截整图 + 截小地图
+
+import time
+import mss
+import numpy as np
+import cv2
+import pygetwindow as gw
+
+
+class GameWindowBinder:
+    def __init__(self, window_title='地下城与勇士：创新世纪'):
+        self.window_title = window_title
+        self.window = None
+        self.sct = mss.mss()
+
+    def bind(self):
+        wins = gw.getWindowsWithTitle(self.window_title)
+        if not wins:
+            raise RuntimeError(f"没找到游戏窗口: {self.window_title}")
+        self.window = wins[0]
+        return True
+
+    def refresh_window(self):
+        if self.window is None:
+            self.bind()
+        return self.window
+
+    def get_rect(self):
+        w = self.refresh_window()
+
+        # 某些情况下窗口最小化会导致截图异常
+        if w.isMinimized:
+            raise RuntimeError("游戏窗口已最小化，请恢复窗口")
+
+        left = max(0, w.left)
+        top = max(0, w.top)
+        width = max(100, w.width)
+        height = max(100, w.height)
+        return left, top, width, height
+
+    def grab(self, rgb=False):
+        left, top, width, height = self.get_rect()
+        monitor = {
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height
+        }
+        img = np.array(self.sct.grab(monitor))  # BGRA
+        if rgb:
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    def grab_crop(self, crop_x, crop_y, crop_w, crop_h, rgb=False):
+        left, top, width, height = self.get_rect()
+
+        x = left + crop_x
+        y = top + crop_y
+        w = crop_w
+        h = crop_h
+
+        # 防止越界
+        if x < left:
+            x = left
+        if y < top:
+            y = top
+        if x + w > left + width:
+            w = (left + width) - x
+        if y + h > top + height:
+            h = (top + height) - y
+
+        w = max(10, w)
+        h = max(10, h)
+
+        monitor = {
+            "left": x,
+            "top": y,
+            "width": w,
+            "height": h
+        }
+
+        img = np.array(self.sct.grab(monitor))  # BGRA
+        if rgb:
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+
+if __name__ == "__main__":
+    binder = GameWindowBinder('地下城与勇士：创新世纪')
+    binder.bind()
+
+    # 这里是你截图里右上角小地图的大概位置，后面可微调
+    crop_x, crop_y = 1100, 88
+    crop_w, crop_h = 160, 90
+
+    while True:
+        try:
+            frame = binder.grab(rgb=False)
+            minimap = binder.grab_crop(crop_x, crop_y, crop_w, crop_h, rgb=False)
+
+            cv2.imshow("DNF_Window", frame)
+            cv2.imshow("DNF_Minimap", minimap)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        except Exception as e:
+            print("错误:", e)
+            time.sleep(0.5)
+
+    cv2.destroyAllWindows()
