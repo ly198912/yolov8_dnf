@@ -1,0 +1,234 @@
+import math
+import time
+import pydirectinput
+
+# 防止输入太快
+pydirectinput.PAUSE = 0.02
+pydirectinput.FAILSAFE = False
+
+
+class SimpleGameAgent:
+    def __init__(self, obj_list, screen_w, screen_h):
+        self.obj_list = obj_list if obj_list else []
+        self.screen_w = screen_w
+        self.screen_h = screen_h
+
+        self.player = self._get_one("player")
+        self.boss = self._get_one("boss")
+        self.door = self._get_one("door")
+        self.monsters = self._get_all("monster")
+        self.goods = self._get_all("goods")
+        self.money = self._get_all("money")
+
+    def _get_all(self, cls_name):
+        results = []
+        for item in self.obj_list:
+            for k, v in item.items():
+                if str(k).lower() == cls_name:
+                    results.append(v)
+        return results
+
+    def _get_one(self, cls_name):
+        objs = self._get_all(cls_name)
+        return objs[0] if objs else None
+
+    def _get_center(self, det):
+        xywh = det["xywh"]
+        return xywh[0], xywh[1]
+
+    def _distance(self, a, b):
+        ax, ay = a
+        bx, by = b
+        return math.sqrt((ax - bx) ** 2 + (ay - by) ** 2)
+
+    def _nearest(self, det_list):
+        if not self.player or not det_list:
+            return None
+
+        px, py = self._get_center(self.player)
+        target = None
+        best_dist = 999999
+
+        for det in det_list:
+            tx, ty = self._get_center(det)
+            d = self._distance((px, py), (tx, ty))
+            if d < best_dist:
+                best_dist = d
+                target = det
+        return target
+
+    def _tap(self, key, t=0.05):
+        pydirectinput.keyDown(key)
+        time.sleep(t)
+        pydirectinput.keyUp(key)
+
+    def _move_dir(self, direction, duration=0.12):
+        if direction == "LEFT":
+            self._tap("left", duration)
+        elif direction == "RIGHT":
+            self._tap("right", duration)
+        elif direction == "UP":
+            self._tap("up", duration)
+        elif direction == "DOWN":
+            self._tap("down", duration)
+        elif direction == "LEFT_UP":
+            pydirectinput.keyDown("left")
+            pydirectinput.keyDown("up")
+            time.sleep(duration)
+            pydirectinput.keyUp("up")
+            pydirectinput.keyUp("left")
+        elif direction == "LEFT_DOWN":
+            pydirectinput.keyDown("left")
+            pydirectinput.keyDown("down")
+            time.sleep(duration)
+            pydirectinput.keyUp("down")
+            pydirectinput.keyUp("left")
+        elif direction == "RIGHT_UP":
+            pydirectinput.keyDown("right")
+            pydirectinput.keyDown("up")
+            time.sleep(duration)
+            pydirectinput.keyUp("up")
+            pydirectinput.keyUp("right")
+        elif direction == "RIGHT_DOWN":
+            pydirectinput.keyDown("right")
+            pydirectinput.keyDown("down")
+            time.sleep(duration)
+            pydirectinput.keyUp("down")
+            pydirectinput.keyUp("right")
+
+    def _move_towards_target(self, target, close_dist=80):
+        if not self.player or not target:
+            return False
+
+        px, py = self._get_center(self.player)
+        tx, ty = self._get_center(target)
+
+        dx = tx - px
+        dy = ty - py
+        dist = self._distance((px, py), (tx, ty))
+
+        if dist <= close_dist:
+            return True
+
+        horizontal = ""
+        vertical = ""
+
+        if dx > 20:
+            horizontal = "RIGHT"
+        elif dx < -20:
+            horizontal = "LEFT"
+
+        if dy > 20:
+            vertical = "DOWN"
+        elif dy < -20:
+            vertical = "UP"
+
+        if horizontal and vertical:
+            direction = f"{horizontal}_{vertical}"
+        elif horizontal:
+            direction = horizontal
+        elif vertical:
+            direction = vertical
+        else:
+            direction = "STAY"
+
+        if direction != "STAY":
+            self._move_dir(direction, duration=0.15)
+
+        return False
+
+    def _attack(self):
+        self._tap("x", 0.05)
+        time.sleep(0.05)
+        self._tap("x", 0.05)
+
+    def _pickup(self):
+        self._tap("x", 0.05)
+
+    def _direction_match(self, expected_direction, target, tol=20):
+        if not self.player or not target:
+            return False
+        if not expected_direction or expected_direction == "STAY":
+            return True
+
+        px, py = self._get_center(self.player)
+        tx, ty = self._get_center(target)
+        dx = tx - px
+        dy = ty - py
+        parts = expected_direction.split("_")
+
+        if "RIGHT" in parts and dx <= tol:
+            return False
+        if "LEFT" in parts and dx >= -tol:
+            return False
+        if "DOWN" in parts and dy <= tol:
+            return False
+        if "UP" in parts and dy >= -tol:
+            return False
+
+        return True
+
+    def _go_door(self):
+        arrived = self._move_towards_target(self.door, close_dist=65)
+        if arrived:
+            if self.player and self.door:
+                px, _ = self._get_center(self.player)
+                dx, _ = self._get_center(self.door)
+                if dx >= px:
+                    self._tap("right", 0.16)
+                else:
+                    self._tap("left", 0.16)
+            time.sleep(0.05)
+            self._tap("up", 0.05)
+            time.sleep(0.05)
+
+    def summary(self):
+        return {
+            "player": bool(self.player),
+            "boss": bool(self.boss),
+            "door": bool(self.door),
+            "monster_count": len(self.monsters),
+            "goods_count": len(self.goods),
+            "money_count": len(self.money),
+        }
+
+    def run(self, yolo_direction=None, minimap_direction=None):
+        expected_direction = yolo_direction or minimap_direction
+
+        if self.player:
+            if self.boss:
+                arrived = self._move_towards_target(self.boss, close_dist=120)
+                if arrived:
+                    self._attack()
+                return "打boss"
+
+            if self.monsters:
+                target = self._nearest(self.monsters)
+                arrived = self._move_towards_target(target, close_dist=120)
+                if arrived:
+                    self._attack()
+                return "清怪"
+
+            loot_list = self.goods + self.money
+            if loot_list:
+                target = self._nearest(loot_list)
+                arrived = self._move_towards_target(target, close_dist=70)
+                if arrived:
+                    self._pickup()
+                return "捡物"
+
+            if self.door and self._direction_match(expected_direction, self.door):
+                self._go_door()
+                return "进门"
+
+            if expected_direction and expected_direction != "STAY":
+                self._move_dir(expected_direction, duration=0.12)
+                return f"按路线移动:{expected_direction}"
+
+            return "待机"
+
+        if expected_direction and expected_direction != "STAY":
+            self._move_dir(expected_direction, duration=0.08)
+            return f"没看到角色，按路线探路:{expected_direction}"
+
+        return "没看到角色"
