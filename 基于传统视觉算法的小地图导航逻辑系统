@@ -1,0 +1,161 @@
+import cv2
+import numpy as np
+
+
+class MinimapNavigator:
+    def __init__(self):
+        # 小地图区域：相对游戏窗口右上角
+        # 适配比写死 crop_x=1100 更稳
+        self.right_margin = 18
+        self.top_margin = 42
+        self.crop_w = 170
+        self.crop_h = 95
+
+        # 蓝色人物点
+        self.blue_lower = np.array([90, 70, 70], dtype=np.uint8)
+        self.blue_upper = np.array([140, 255, 255], dtype=np.uint8)
+
+        # 黄色目标/问号（放宽）
+        self.yellow_lower = np.array([10, 60, 80], dtype=np.uint8)
+        self.yellow_upper = np.array([45, 255, 255], dtype=np.uint8)
+
+        # 白色目标点（很多图里问号/目标标识会偏白）
+        self.white_lower = np.array([0, 0, 180], dtype=np.uint8)
+        self.white_upper = np.array([180, 80, 255], dtype=np.uint8)
+
+        self.kernel = np.ones((3, 3), np.uint8)
+
+        self.dx_threshold = 5
+        self.dy_threshold = 5
+
+    def get_crop_rect(self, window_w, window_h):
+        crop_x = max(0, window_w - self.crop_w - self.right_margin)
+        crop_y = max(0, self.top_margin)
+        return crop_x, crop_y, self.crop_w, self.crop_h
+
+    def _find_center_by_mask(self, mask, min_area=4):
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        best = None
+        best_area = 0
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            cx = x + w // 2
+            cy = y + h // 2
+
+            if area > best_area:
+                best_area = area
+                best = (cx, cy, x, y, w, h, area)
+
+        return best
+
+    def _calc_direction(self, blue_center, target_center):
+        bx, by = blue_center
+        tx, ty = target_center
+
+        dx = tx - bx
+        dy = ty - by
+
+        horizontal = ""
+        vertical = ""
+
+        if dx > self.dx_threshold:
+            horizontal = "RIGHT"
+        elif dx < -self.dx_threshold:
+            horizontal = "LEFT"
+
+        if dy > self.dy_threshold:
+            vertical = "DOWN"
+        elif dy < -self.dy_threshold:
+            vertical = "UP"
+
+        if horizontal and vertical:
+            return f"{horizontal}_{vertical}"
+        if horizontal:
+            return horizontal
+        if vertical:
+            return vertical
+        return "STAY"
+
+    def analyze(self, minimap_bgr):
+        result = {
+            "blue_found": False,
+            "target_found": False,
+            "blue_center": None,
+            "target_center": None,
+            "direction": None,
+            "debug_img": None,
+            "blue_mask": None,
+            "q_mask": None
+        }
+
+        if minimap_bgr is None or minimap_bgr.size == 0:
+            return result
+
+        debug_img = minimap_bgr.copy()
+        hsv = cv2.cvtColor(minimap_bgr, cv2.COLOR_BGR2HSV)
+
+        # 蓝点
+        blue_mask = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+
+        # 黄色目标
+        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
+
+        # 白色目标
+        white_mask = cv2.inRange(hsv, self.white_lower, self.white_upper)
+
+        blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_OPEN, self.kernel)
+        blue_mask = cv2.morphologyEx(blue_mask, cv2.MORPH_DILATE, self.kernel)
+
+        yellow_mask = cv2.morphologyEx(yellow_mask, cv2.MORPH_OPEN, self.kernel)
+        yellow_mask = cv2.morphologyEx(yellow_mask, cv2.MORPH_DILATE, self.kernel)
+
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, self.kernel)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_DILATE, self.kernel)
+
+        # 合并黄色+白色，作为目标遮罩
+        target_mask = cv2.bitwise_or(yellow_mask, white_mask)
+
+        blue_obj = self._find_center_by_mask(blue_mask, min_area=4)
+        target_obj = self._find_center_by_mask(target_mask, min_area=4)
+
+        result["blue_mask"] = blue_mask
+        result["q_mask"] = target_mask
+
+        if blue_obj:
+            bx, by, x, y, w, h, area = blue_obj
+            result["blue_found"] = True
+            result["blue_center"] = (bx, by)
+            cv2.rectangle(debug_img, (x, y), (x + w, y + h), (255, 0, 0), 1)
+            cv2.circle(debug_img, (bx, by), 3, (255, 0, 0), -1)
+            cv2.putText(debug_img, "BLUE", (x, max(12, y - 2)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+
+        if target_obj:
+            tx, ty, x, y, w, h, area = target_obj
+            result["target_found"] = True
+            result["target_center"] = (tx, ty)
+            cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 255), 1)
+            cv2.circle(debug_img, (tx, ty), 3, (0, 255, 255), -1)
+            cv2.putText(debug_img, "TARGET", (x, max(12, y - 2)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+        if result["blue_found"] and result["target_found"]:
+            direction = self._calc_direction(result["blue_center"], result["target_center"])
+            result["direction"] = direction
+
+            bx, by = result["blue_center"]
+            tx, ty = result["target_center"]
+            cv2.line(debug_img, (bx, by), (tx, ty), (0, 0, 255), 1)
+            cv2.putText(debug_img, direction, (5, 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        result["debug_img"] = debug_img
+        return result
